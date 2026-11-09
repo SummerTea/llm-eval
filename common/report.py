@@ -9,6 +9,24 @@ from typing import Any
 _BAD_FINISH_REASONS = {"length", "prompt_length_exceeded", "ignored", "aborted", "error", "preempted"}
 _MAX_PROBLEM_ROWS = 500
 
+_FINISH_ZH = {
+    "stop": "正常结束",
+    "length": "达到最大长度",
+    "prompt_length_exceeded": "提示词过长",
+    "ignored": "被忽略",
+    "aborted": "中止",
+    "error": "错误",
+    "preempted": "被抢占",
+}
+_EXTRACT_ZH = {
+    "boxed": "\\boxed{}",
+    "tail_number": "末尾数字",
+    "answer_line": "Answer 行",
+    "tail_letter": "末尾字母",
+    "none": "未抽取到",
+}
+_JUDGE_ZH = {"rule": "规则", "llm": "裁判", "auto": "自动"}
+
 _STYLE = """
 :root { color-scheme: light; }
 * { box-sizing: border-box; }
@@ -79,10 +97,36 @@ def _bar(value: Any) -> str:
     return f'<div class="track"><div class="bar" style="width:{_width(value):.2f}%"></div></div>'
 
 
+def _map_keys(obj: Any, mapping: dict[str, str]) -> Any:
+    if not isinstance(obj, dict):
+        return obj
+    return {mapping.get(str(key), key): value for key, value in obj.items()}
+
+
 def _kv(obj: Any) -> str:
     if not isinstance(obj, dict) or not obj:
         return "—"
     return ", ".join(f"{_e(key)}: {_e(obj[key])}" for key in sorted(obj, key=lambda k: str(k)))
+
+
+def _bool_zh(value: Any) -> str:
+    if value is True:
+        return "是"
+    if value is False:
+        return "否"
+    return _val(value)
+
+
+def _correct_zh(value: Any) -> str:
+    if value is True:
+        return "正确"
+    if value is False:
+        return "错误"
+    return _val(value)
+
+
+def _judge_zh(value: Any) -> str:
+    return _val(_JUDGE_ZH.get(str(value), value))
 
 
 def _excerpt(raw: Any, limit: int = 200) -> str:
@@ -92,24 +136,24 @@ def _excerpt(raw: Any, limit: int = 200) -> str:
 def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, Any]]) -> str:
     generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    meta_items = [
-        ("bench", summary.get("bench")),
-        ("model_name", summary.get("model_name")),
-        ("judge", summary.get("judge")),
-        ("sample_ratio", summary.get("sample_ratio")),
-        ("generated", generated),
+    meta_items: list[tuple[str, str]] = [
+        ("基准", _val(summary.get("bench"))),
+        ("模型", _val(summary.get("model_name"))),
+        ("判分方式", _judge_zh(summary.get("judge"))),
+        ("采样比例", _val(summary.get("sample_ratio"))),
+        ("生成时间", _val(generated)),
     ]
     if summary.get("judge_model"):
-        meta_items.append(("judge_model", summary.get("judge_model")))
-    meta_html = "".join(f"<span><b>{_e(label)}</b>: {_val(value)}</span>" for label, value in meta_items)
+        meta_items.append(("判题模型", _val(summary.get("judge_model"))))
+    meta_html = "".join(f"<span><b>{_e(label)}</b>: {value}</span>" for label, value in meta_items)
 
     cards = [
         ("Pass@1", _pct(summary.get("Pass@1"))),
-        ("score", _pct(summary.get("score"))),
-        ("num_tasks", _val(summary.get("num_tasks"))),
-        ("num_rollouts", _val(summary.get("num_rollouts"))),
-        ("n_sample", _val(summary.get("n_sample"))),
-        ("coverage_complete", _val(summary.get("coverage_complete"))),
+        ("平均得分", _pct(summary.get("score"))),
+        ("题目数", _val(summary.get("num_tasks"))),
+        ("样本数", _val(summary.get("num_rollouts"))),
+        ("每题采样", _val(summary.get("n_sample"))),
+        ("覆盖率完整", _bool_zh(summary.get("coverage_complete"))),
     ]
     cards_html = "".join(
         f'<div class="card"><div class="label">{_e(label)}</div><div class="value">{value}</div></div>'
@@ -123,7 +167,7 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
     pass_keys = sorted((key for key in summary if str(key).startswith("Pass@")), key=_pass_order)
     if pass_keys:
         pass_html = (
-            "<table><thead><tr><th>Metric</th><th>Bar</th><th>Value</th></tr></thead><tbody>"
+            "<table><thead><tr><th>指标</th><th>柱状图</th><th>数值</th></tr></thead><tbody>"
             + "".join(
                 f"<tr><td><b>{_e(key)}</b></td><td>{_bar(summary.get(key))}</td><td>{_pct(summary.get(key))}</td></tr>"
                 for key in pass_keys
@@ -131,24 +175,24 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
             + "</tbody></table>"
         )
     else:
-        pass_html = '<p class="muted">No Pass@k metrics in summary.</p>'
+        pass_html = '<p class="muted">汇总中没有 Pass@k 指标。</p>'
 
     diag_items: list[tuple[str, str]] = [
-        ("finish_reasons", _kv(summary.get("finish_reasons"))),
-        ("extract_sources", _kv(summary.get("extract_sources"))),
-        ("truncated_rollouts", _val(summary.get("truncated_rollouts"))),
-        ("invalid_rollouts", _val(summary.get("invalid_rollouts"))),
-        ("extract_failed", _pct(summary.get("extract_failed"))),
-        ("rule_vs_llm_agreement", _pct(summary.get("rule_vs_llm_agreement"))),
-        ("judge_unparsed", _pct(summary.get("judge_unparsed"))),
-        ("judge_verdict_unparsed", _pct(summary.get("judge_verdict_unparsed"))),
+        ("结束原因分布", _kv(_map_keys(summary.get("finish_reasons"), _FINISH_ZH))),
+        ("答案抽取来源", _kv(_map_keys(summary.get("extract_sources"), _EXTRACT_ZH))),
+        ("截断样本数", _val(summary.get("truncated_rollouts"))),
+        ("无效样本数", _val(summary.get("invalid_rollouts"))),
+        ("抽取失败率", _pct(summary.get("extract_failed"))),
+        ("规则/裁判一致率", _pct(summary.get("rule_vs_llm_agreement"))),
+        ("裁判未解析率", _pct(summary.get("judge_unparsed"))),
+        ("裁判结论未解析率", _pct(summary.get("judge_verdict_unparsed"))),
     ]
     if summary.get("expected_tasks") is not None:
-        diag_items.append(("expected_tasks", _val(summary.get("expected_tasks"))))
+        diag_items.append(("期望题目数", _val(summary.get("expected_tasks"))))
     if summary.get("expected_rollouts") is not None:
-        diag_items.append(("expected_rollouts", _val(summary.get("expected_rollouts"))))
+        diag_items.append(("期望样本数", _val(summary.get("expected_rollouts"))))
     if summary.get("missing_tasks"):
-        diag_items.append(("missing_tasks", _val(summary.get("missing_tasks"))))
+        diag_items.append(("缺失题目数", _val(summary.get("missing_tasks"))))
     diag_html = '<div class="diag">' + "".join(
         f"<div><b>{_e(label)}</b>{value}</div>" for label, value in diag_items
     ) + "</div>"
@@ -165,8 +209,8 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
         accuracy = {tid: corrects[tid] / counts[tid] for tid in counts}
 
     task_table = (
-        f"<details><summary>Per-task accuracy ({len(accuracy)} tasks)</summary>"
-        "<table><thead><tr><th>task_id</th><th>Bar</th><th>Accuracy</th><th>Rollouts</th></tr></thead><tbody>"
+        f"<details><summary>逐题正确率（共 {len(accuracy)} 题）</summary>"
+        "<table><thead><tr><th>题目</th><th>柱状图</th><th>正确率</th><th>样本数</th></tr></thead><tbody>"
         + "".join(
             f"<tr><td class='mono'>{_e(tid)}</td><td>{_bar(accuracy.get(tid, 0.0))}</td>"
             f"<td>{_pct(accuracy.get(tid, 0.0))}</td><td>{_val(counts.get(tid, 0))}</td></tr>"
@@ -188,54 +232,54 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
         "<tr>"
         f"<td class='mono'>{_e(row.get('task_id'))}</td>"
         f"<td>{_e(row.get('sample_idx'))}</td>"
-        f"<td>{_e(row.get('correct'))}</td>"
+        f"<td>{_correct_zh(row.get('correct'))}</td>"
         f"<td class='mono'>{_text(row.get('pred'))}</td>"
         f"<td class='mono'>{_text(row.get('gold'))}</td>"
-        f"<td>{_e(row.get('extract_source'))}</td>"
-        f"<td>{_e(row.get('finish_reason'))}</td>"
+        f"<td>{_e(_EXTRACT_ZH.get(str(row.get('extract_source')), row.get('extract_source')))}</td>"
+        f"<td>{_e(_FINISH_ZH.get(str(row.get('finish_reason')), row.get('finish_reason')))}</td>"
         f"<td class='mono'>{_excerpt(row.get('raw_text'))}</td>"
         "</tr>"
         for row in shown
     )
     if problems:
         note = (
-            f"<p class='muted'>showing first {_MAX_PROBLEM_ROWS} of {len(problems)} problem rollouts</p>"
+            f"<p class='muted'>仅显示前 {_MAX_PROBLEM_ROWS} 条，共 {len(problems)} 条问题样本</p>"
             if len(problems) > _MAX_PROBLEM_ROWS
             else ""
         )
         problem_html = (
             note
             + "<table><thead><tr>"
-            "<th>task_id</th><th>sample_idx</th><th>correct</th><th>pred</th><th>gold</th>"
-            "<th>extract_source</th><th>finish_reason</th><th>raw excerpt</th>"
+            "<th>题目</th><th>样本序号</th><th>是否正确</th><th>预测</th><th>标准答案</th>"
+            "<th>抽取来源</th><th>结束原因</th><th>输出摘录</th>"
             "</tr></thead><tbody>"
             + problem_rows
             + "</tbody></table>"
         )
     else:
-        problem_html = "<p class='muted'>No problem rollouts.</p>"
+        problem_html = "<p class='muted'>没有异常或错误的样本。</p>"
 
     doc = f"""<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{_e(summary.get("bench"))} report</title>
+<title>{_e(summary.get("bench"))} 评分报告</title>
 <style>{_STYLE}</style>
 </head>
 <body>
 <main>
-<h1>{_e(summary.get("bench"))} scoring report</h1>
+<h1>{_e(summary.get("bench"))} 评分报告</h1>
 <div class="muted">{_e(summary.get("model_name"))}</div>
 <div class="meta">{meta_html}</div>
 <div class="cards">{cards_html}</div>
-<h2>Pass@k</h2>
+<h2>Pass@k 指标</h2>
 {pass_html}
-<h2>Diagnostics</h2>
+<h2>诊断信息</h2>
 {diag_html}
-<h2>Per-task accuracy</h2>
+<h2>逐题正确率</h2>
 {task_table}
-<h2>Problem rollouts</h2>
+<h2>异常 / 翻车样本</h2>
 {problem_html}
 </main>
 </body>

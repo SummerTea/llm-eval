@@ -9,4 +9,4 @@ DEFAULT_OUT_ROOT = EVAL_DIR / "outputs"
 
 
 def resolve_out_dir(out_dir: str | None, *, bench: str, tag: str) -> str:
-    return out_dir or str(DEFAULT_OUT_ROOT / bench / tag)
+    return out_dir or str(DEFAULT_OUT_ROOT / f"{bench}-{tag}")

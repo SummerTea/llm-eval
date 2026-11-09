@@ -16,7 +16,7 @@ RATIO="${RATIO:-}"
 SUFFIX="${RATIO:+_r${RATIO}}"
 TAG="${TAG:-${MODEL//\//_}-n${N_SAMPLE}-r${RATIO:-full}-$(date -u +%Y%m%dT%H%M%SZ)}"
 DATA_FILE="${DATA_FILE:-${EVAL_DIR}/data/gpqa_diamond${SUFFIX}.jsonl}"
-OUT="${EVAL_DIR}/outputs/gpqa/${TAG}"
+OUT="${EVAL_DIR}/outputs/gpqa-${TAG}"
 TEXT_ONLY="${TEXT_ONLY:-0}"
 CHECK="${CHECK:-}"
 

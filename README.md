@@ -49,13 +49,13 @@ RATIO=0.2 N_SAMPLE=1 bash gpqa/run.sh
 终端应看到类似输出：
 
 ```text
-[gpqa] model=... n_sample=1 ratio=0.2 check=auto text_only=0 -> .../outputs/gpqa/...
+[gpqa] model=... n_sample=1 ratio=0.2 check=auto text_only=0 -> .../outputs/gpqa-...
 ...
 gpqa  <model>  judge=rule
 tasks=40  rollouts=40  n_sample=1
   Pass@1     =  93.40
 coverage: expected 40 rollouts / 40 tasks, got 40 / 40, complete=True
-wrote .../outputs/gpqa/<model>-n1-r0.2-<UTC>/report.html
+wrote .../outputs/gpqa-<model>-n1-r0.2-<UTC>/report.html
 ```
 
 用浏览器打开 `report.html` 即可看到完整报告；`summary.json` 是机器可读的汇总。
@@ -143,7 +143,7 @@ RATIO=0.2 N_SAMPLE=8 bash aime/run.sh
 
 ```bash
 EVAL_JUDGE_BASE_URL=... EVAL_JUDGE_API_KEY=... EVAL_JUDGE_MODEL=... \
-python score.py --out-dir outputs/gpqa/<tag> --check llm
+python score.py --out-dir outputs/gpqa-<tag> --check llm
 ```
 
 ### 自定义数据文件
@@ -185,7 +185,7 @@ DATA_FILE=/path/to/my.jsonl N_SAMPLE=1 bash gpqa/run.sh
 每轮运行都会生成独立目录（默认带 UTC 时间戳，不会互相覆盖）：
 
 ```text
-outputs/<bench>/<model>-n<N>-r<ratio|full>-<UTC>/
+outputs/<bench>-<model>-n<N>-r<ratio|full>-<UTC>/
 ```
 
 | 文件 | 内容 |

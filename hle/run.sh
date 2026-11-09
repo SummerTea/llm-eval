@@ -16,7 +16,7 @@ RATIO="${RATIO:-}"
 SUFFIX="${RATIO:+_r${RATIO}}"
 TAG="${TAG:-${MODEL//\//_}-n${N_SAMPLE}-r${RATIO:-full}-$(date -u +%Y%m%dT%H%M%SZ)}"
 DATA_FILE="${DATA_FILE:-${EVAL_DIR}/data/hle_test${SUFFIX}.jsonl}"
-OUT="${EVAL_DIR}/outputs/hle/${TAG}"
+OUT="${EVAL_DIR}/outputs/hle-${TAG}"
 TEXT_ONLY="${TEXT_ONLY:-0}"
 CHECK="${CHECK:-}"
 

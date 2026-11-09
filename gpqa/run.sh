@@ -22,6 +22,7 @@ CHECK="${CHECK:-}"
 MAX_TOKENS="${MAX_TOKENS:-}"
 LIMIT="${LIMIT:-}"
 CONCURRENCY="${CONCURRENCY:-16}"
+JUDGE_CONCURRENCY="${JUDGE_CONCURRENCY:-16}"
 
 ARGS=(--task "${TASK}" --test-set "gpqa:${DATA_FILE}" --model "${MODEL}" \
     --n-sample "${N_SAMPLE}" --temperature "${TEMPERATURE}" --concurrency "${CONCURRENCY}")
@@ -34,7 +35,7 @@ echo "[gpqa] task=${TASK} model=${MODEL} n_sample=${N_SAMPLE} ratio=${RATIO:-ful
 
 python "${EVAL_DIR}/run_eval.py" "${ARGS[@]}"
 
-SCORE_ARGS=(--out-dir "${OUT}" --judge-concurrency 16)
+SCORE_ARGS=(--out-dir "${OUT}" --judge-concurrency "${JUDGE_CONCURRENCY}")
 [ -n "${CHECK}" ] && SCORE_ARGS+=(--check "${CHECK}")
 python "${EVAL_DIR}/score.py" "${SCORE_ARGS[@]}"
 

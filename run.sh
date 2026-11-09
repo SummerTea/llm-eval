@@ -23,6 +23,7 @@ REASONING_EFFORT="${REASONING_EFFORT:-}"
 MAX_TOKENS="${MAX_TOKENS:-}"
 LIMIT="${LIMIT:-}"
 CONCURRENCY="${CONCURRENCY:-16}"
+JUDGE_CONCURRENCY="${JUDGE_CONCURRENCY:-16}"
 TEXT_ONLY="${TEXT_ONLY:-0}"
 CHECK="${CHECK:-}"
 
@@ -46,7 +47,7 @@ python "${EVAL_DIR}/run_eval.py" "${ARGS[@]}"
 
 # 2) evaluate: one summary + one report for the whole task
 # judge env is only needed when the effective check is llm (HLE always; others only with CHECK=llm)
-SCORE_ARGS=(--out-dir "${OUT}" --judge-concurrency 16)
+SCORE_ARGS=(--out-dir "${OUT}" --judge-concurrency "${JUDGE_CONCURRENCY}")
 [ -n "${CHECK}" ] && SCORE_ARGS+=(--check "${CHECK}")
 python "${EVAL_DIR}/score.py" "${SCORE_ARGS[@]}"
 

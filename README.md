@@ -238,6 +238,7 @@ outputs/<task>/
 | `MAX_TOKENS` | 透传给端点；默认 32768 |
 | `LIMIT` | 每个测试集只跑前 N 题 |
 | `CONCURRENCY` | 并发请求数（默认 16） |
+| `JUDGE_CONCURRENCY` | LLM 判题并发数（默认 16）；HLE 或 `CHECK=llm` 时生效 |
 | `REASONING_EFFORT` | 可选，透传（如 `low`/`medium`/`high`） |
 | `TEXT_ONLY` | `1`=跳过所有测试集的图片题 |
 | `CHECK` | 空=按测试集默认判题；`llm`=全部走 LLM 判题 |

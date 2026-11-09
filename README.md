@@ -220,6 +220,8 @@ outputs/<task>/
 
 可用 `TASK=my-run` 指定任务名（即目录名）；省略时按 `<model>-<UTC>` 自动生成。
 
+历史结果可直接删除 `outputs/`（不影响 `data/`）；`data/` 是准备数据，删除后需重新运行 `prepare_data.py`。
+
 ---
 
 ## 参数速查

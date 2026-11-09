@@ -86,17 +86,72 @@ def _build_messages(record: dict[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
-def run_rank(records: list[dict[str, Any]], args: argparse.Namespace, out_dir: str) -> None:
-    plan = [(problem, sample) for problem in range(len(records)) for sample in range(args.n_sample)]
+def _parse_test_sets(args: argparse.Namespace, parser: argparse.ArgumentParser) -> list[dict[str, Any]]:
+    specs = list(args.test_set or [])
+    if not specs:
+        if args.bench and args.data_file:
+            return [{"name": args.bench, "bench": args.bench, "data_file": args.data_file}]
+        parser.error("provide --test-set BENCH:FILE (repeatable) or --bench + --data-file")
+
+    test_sets: list[dict[str, Any]] = []
+    seen: dict[str, int] = {}
+    for spec in specs:
+        if ":" not in spec:
+            parser.error(f"--test-set expects BENCH:FILE, got {spec!r}")
+        bench_name, data_file = spec.split(":", 1)
+        if bench_name not in SUPPORTED:
+            parser.error(f"unknown bench {bench_name!r}; expected one of {', '.join(SUPPORTED)}")
+        count = seen.get(bench_name, 0) + 1
+        seen[bench_name] = count
+        test_sets.append(
+            {"name": bench_name if count == 1 else f"{bench_name}_{count}", "bench": bench_name, "data_file": data_file}
+        )
+    return test_sets
+
+
+def _load_test_sets(test_sets: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
+    loaded: list[dict[str, Any]] = []
+    for test_set in test_sets:
+        bench = load_bench(test_set["bench"])
+        problems = bench.load(test_set["data_file"])
+        records = bench.build_records(problems, limit=args.limit)
+        if args.text_only:
+            before = len(records)
+            records = [record for record in records if not record.get("image_paths")]
+            print(f"[gen] {test_set['name']}: text-only skipped {before - len(records)} image tasks", flush=True)
+        if not records:
+            raise SystemExit(
+                f"no problem left in test set {test_set['name']} (check data file / --limit / --text-only)"
+            )
+        manifest = _read_data_manifest(test_set["data_file"])
+        loaded.append(
+            {
+                **test_set,
+                "records": records,
+                "sample_ratio": float(manifest.get("sample_ratio", 1.0)),
+                "expected_tasks": len(records),
+            }
+        )
+    return loaded
+
+
+def run_rank(test_sets: list[dict[str, Any]], args: argparse.Namespace, out_dir: str) -> None:
+    plan = [
+        (set_index, problem, sample)
+        for set_index, test_set in enumerate(test_sets)
+        for problem in range(len(test_set["records"]))
+        for sample in range(args.n_sample)
+    ]
     if not plan:
         os.makedirs(out_dir, exist_ok=True)
         write_jsonl(os.path.join(out_dir, "raw_rank000.jsonl"), [])
         print("[gen] no request to run", flush=True)
         return
 
-    def _one(item: tuple[int, int]) -> dict[str, Any]:
-        problem, sample = item
-        record = records[problem]
+    def _one(item: tuple[int, int, int]) -> dict[str, Any]:
+        set_index, problem, sample = item
+        test_set = test_sets[set_index]
+        record = test_set["records"][problem]
         payload: dict[str, Any] = {
             "model": args.model,
             "messages": _build_messages(record),
@@ -109,6 +164,7 @@ def run_rank(records: list[dict[str, Any]], args: argparse.Namespace, out_dir: s
         if args.seed is not None:
             payload["seed"] = (args.seed + problem * args.n_sample + sample) % (2**31)
         row: dict[str, Any] = {
+            "test_set": test_set["name"],
             "task_id": record["task_id"],
             "sample_idx": sample,
             "raw_text": "",
@@ -146,8 +202,9 @@ def run_rank(records: list[dict[str, Any]], args: argparse.Namespace, out_dir: s
             row["error"] = f"{type(exc).__name__}: {exc}"
         return row
 
+    names = ",".join(test_set["name"] for test_set in test_sets)
     print(
-        f"[gen] model={args.model} requests={len(plan)} problems={len(records)} n_sample={args.n_sample} "
+        f"[gen] model={args.model} test_sets=[{names}] requests={len(plan)} n_sample={args.n_sample} "
         f"concurrency={args.concurrency} text_only={args.text_only}",
         flush=True,
     )
@@ -162,12 +219,19 @@ def run_rank(records: list[dict[str, Any]], args: argparse.Namespace, out_dir: s
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="generate benchmark outputs through an OpenAI-compatible API")
-    parser.add_argument("--bench", default="aime", choices=list(SUPPORTED))
-    parser.add_argument("--data-file", required=True, help="prepared problem jsonl (see prepare_data.py)")
-    parser.add_argument("--limit", type=int, default=None, help="run only the first N problems")
-    parser.add_argument("--out-dir", default=None)
-    parser.add_argument("--tag", default=None, help="output dir suffix")
+    parser = argparse.ArgumentParser(description="run one evaluation task over one or more test sets")
+    parser.add_argument("--task", default=None, help="task name; the output dir is outputs/<task>")
+    parser.add_argument(
+        "--test-set",
+        action="append",
+        default=[],
+        metavar="BENCH:FILE",
+        help="test set as BENCH:FILE (aime/gpqa/hle); repeatable, e.g. aime:data/aime_2026.jsonl",
+    )
+    parser.add_argument("--bench", default=None, choices=list(SUPPORTED), help="legacy single test set")
+    parser.add_argument("--data-file", default=None, help="legacy single test set data file")
+    parser.add_argument("--limit", type=int, default=None, help="first N problems of each test set")
+    parser.add_argument("--out-dir", default=None, help="override the output dir")
     parser.add_argument("--base-url", default=os.environ.get("LLM_EVAL_BASE_URL"))
     parser.add_argument("--api-key", default=os.environ.get("LLM_EVAL_API_KEY"))
     parser.add_argument("--model", default=os.environ.get("LLM_EVAL_MODEL"))
@@ -183,13 +247,11 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=float(os.environ.get("LLM_EVAL_TIMEOUT", "600")))
     parser.add_argument("--attempts", type=int, default=int(os.environ.get("LLM_EVAL_ATTEMPTS", "3")))
     parser.add_argument(
-        "--text-only", action="store_true", help="skip image questions (currently only HLE has images)"
+        "--text-only", action="store_true", help="skip image questions in every test set (only HLE has images)"
     )
     args = parser.parse_args()
 
-    for key, default in BENCH_DEFAULTS[args.bench].items():
-        if getattr(args, key) is None:
-            setattr(args, key, default)
+    test_sets = _parse_test_sets(args, parser)
 
     missing = [name for name in ("base_url", "api_key", "model") if not getattr(args, name)]
     if missing:
@@ -199,31 +261,23 @@ def main() -> int:
             + " (or LLM_EVAL_BASE_URL / LLM_EVAL_API_KEY / LLM_EVAL_MODEL)"
         )
 
-    manifest = _read_data_manifest(args.data_file)
-    ratio = float(manifest.get("sample_ratio", 1.0))
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
-    out_dir = resolve_out_dir(
-        args.out_dir,
-        bench=args.bench,
-        tag=args.tag or f"{args.model.replace('/', '_')}-n{args.n_sample}-r{ratio:g}-{stamp}",
-    )
+    if args.n_sample is None:
+        args.n_sample = BENCH_DEFAULTS[test_sets[0]["bench"]]["n_sample"] if len(test_sets) == 1 else 1
+    if args.temperature is None:
+        args.temperature = 1.0
+    if args.top_p is None:
+        args.top_p = 1.0
 
-    bench = load_bench(args.bench)
-    problems = bench.load(args.data_file)
-    records = bench.build_records(problems, limit=args.limit)
-    if args.text_only:
-        before = len(records)
-        records = [record for record in records if not record.get("image_paths")]
-        print(f"[gen] text-only: skipped {before - len(records)} image tasks", flush=True)
-    if not records:
-        raise SystemExit("no problem left to run (check --data-file, --limit and --text-only)")
+    loaded = _load_test_sets(test_sets, args)
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
+    task = args.task or f"{args.model.replace('/', '_')}-n{args.n_sample}-{stamp}"
+    out_dir = resolve_out_dir(args.out_dir, task=task)
 
     meta = {
-        "bench": args.bench,
+        "task": task,
         "model_name": args.model,
         "base_url": args.base_url,
-        "data_file": args.data_file,
-        "limit": args.limit,
         "n_sample": args.n_sample,
         "temperature": args.temperature,
         "top_p": args.top_p,
@@ -231,10 +285,18 @@ def main() -> int:
         "reasoning_effort": args.reasoning_effort,
         "seed": args.seed,
         "text_only": args.text_only,
+        "limit": args.limit,
         "concurrency": args.concurrency,
-        "expected_tasks": len(records),
-        "sample_ratio": ratio,
-        "selected_task_count": len(records),
+        "test_sets": [
+            {
+                "name": test_set["name"],
+                "bench": test_set["bench"],
+                "data_file": test_set["data_file"],
+                "sample_ratio": test_set["sample_ratio"],
+                "expected_tasks": test_set["expected_tasks"],
+            }
+            for test_set in loaded
+        ],
     }
     os.makedirs(out_dir, exist_ok=True)
     for old in Path(out_dir).glob("raw_rank*.jsonl"):
@@ -243,7 +305,7 @@ def main() -> int:
         json.dump(meta, handle, indent=2, ensure_ascii=False)
     print(f"OUT_DIR={out_dir}\nmeta={json.dumps(meta, ensure_ascii=False)}", flush=True)
 
-    run_rank(records, args, out_dir)
+    run_rank(loaded, args, out_dir)
     return 0
 
 

@@ -7,6 +7,7 @@ import os
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 EVAL_DIR = Path(__file__).resolve().parent
 if str(EVAL_DIR) not in sys.path:
@@ -22,7 +23,7 @@ BENCH_DEFAULT_JUDGE = {"aime": "rule", "hle": "llm", "gpqa": "rule"}
 
 
 def load_raw(out_dir: str) -> list[dict]:
-    """Merge every rank's raw output; for a given (task_id, sample_idx) the last write wins."""
+    """Merge every rank's raw output; for a given (test_set, task_id, sample_idx) the last write wins."""
     merged: dict[tuple, dict] = {}
     order: list[tuple] = []
     paths = sorted(glob.glob(os.path.join(out_dir, "raw_rank*.jsonl")))
@@ -30,11 +31,28 @@ def load_raw(out_dir: str) -> list[dict]:
         raise FileNotFoundError(f"no raw_rank*.jsonl under {out_dir} (did generation finish?)")
     for path in paths:
         for row in read_jsonl(path):
-            key = (row["task_id"], row["sample_idx"])
+            key = (row.get("test_set", ""), row["task_id"], row["sample_idx"])
             if key not in merged:
                 order.append(key)
             merged[key] = row
     return [merged[key] for key in order]
+
+
+def _normalize_test_sets(meta: dict) -> list[dict[str, Any]]:
+    test_sets = meta.get("test_sets")
+    if isinstance(test_sets, list) and test_sets:
+        return test_sets
+    if meta.get("bench"):
+        # Legacy single-benchmark meta.
+        return [
+            {
+                "name": meta["bench"],
+                "bench": meta["bench"],
+                "data_file": meta.get("data_file"),
+                "sample_ratio": meta.get("sample_ratio", 1.0),
+            }
+        ]
+    raise SystemExit("meta.json has neither test_sets nor bench; cannot score")
 
 
 def _judge(results: list[dict], by_id: dict, bench_name: str, judge: str, concurrency: int) -> str | None:
@@ -81,53 +99,46 @@ def _judge(results: list[dict], by_id: dict, bench_name: str, judge: str, concur
     return resolve_model()
 
 
-def score_run(
-    out_dir: str,
+def _score_test_set(
+    test_set: dict[str, Any],
+    meta: dict,
+    rollouts: list[dict],
     *,
-    judge: str = "auto",
-    judge_concurrency: int = 8,
-    data_file: str | None = None,
-    verbose: bool = True,
-) -> int:
-    meta_path = os.path.join(out_dir, "meta.json")
-    if not os.path.isfile(meta_path):
-        raise SystemExit(f"missing {meta_path}; run run_eval.py first (score.py scores a generation run)")
-    with open(meta_path) as f:
-        meta = json.load(f)
-
-    bench_name = meta.get("bench", "aime")
+    judge: str,
+    judge_concurrency: int,
+    data_file_override: str | None,
+    legacy_selected: list[str] | None,
+) -> tuple[dict[str, Any], list[dict], str, str | None]:
+    name = test_set["name"]
+    bench_name = test_set["bench"]
     bench = load_bench(bench_name)
-    if judge == "auto":
-        judge = BENCH_DEFAULT_JUDGE.get(bench_name, "rule")
-    data_path = data_file or meta.get("data_file")
+    data_path = data_file_override or test_set.get("data_file")
     if not data_path:
-        raise SystemExit(f"{meta_path} has no data_file; pass --data-file explicitly")
+        raise SystemExit(f"test set {name!r} has no data_file; pass --data-file explicitly for single-set runs")
+
     problems = bench.load(data_path)
     records = bench.build_records(problems, limit=meta.get("limit"))
     if meta.get("text_only"):
         records = [record for record in records if not record.get("image_paths")]
-    selected = meta.get("selected_task_ids")
-    if selected is not None:
-        keep = set(selected)
+    if legacy_selected is not None:
+        keep = set(legacy_selected)
         records = [record for record in records if record["task_id"] in keep]
-    by_id = {r["task_id"]: r for r in records}
+    by_id = {record["task_id"]: record for record in records}
 
-    rollouts = load_raw(out_dir)
-    unknown = [r["task_id"] for r in rollouts if r["task_id"] not in by_id]
-    assert not unknown, f"raw output has task_ids that are not in the dataset: {sorted(set(unknown))[:5]}"
+    set_rollouts = [row for row in rollouts if str(row.get("test_set", "")) == name]
+    unknown = [row["task_id"] for row in set_rollouts if row["task_id"] not in by_id]
+    assert not unknown, f"[{name}] raw output has task_ids that are not in the dataset: {sorted(set(unknown))[:5]}"
 
-    results: list[dict] = []
-    for rollout in rollouts:
-        record = by_id[rollout["task_id"]]
-        row = bench.score_rollout(rollout, record)
-        results.append(row)
+    results = [bench.score_rollout(row, by_id[row["task_id"]]) for row in set_rollouts]
+    for row in results:
+        row["test_set"] = name
 
-    judge_model = _judge(results, by_id, bench_name, judge, judge_concurrency)
+    effective_judge = judge if judge != "auto" else BENCH_DEFAULT_JUDGE.get(bench_name, "rule")
+    judge_model = _judge(results, by_id, bench_name, effective_judge, judge_concurrency)
 
     if not results:
-        raise SystemExit(f"no rollout at all in {out_dir}/raw_rank*.jsonl; refusing to emit an empty score")
+        raise SystemExit(f"no rollout for test set {name!r} in raw_rank*.jsonl; refusing to emit an empty score")
 
-    # Coverage: missing rank files, problems or samples must be surfaced, never silently ignored.
     seen = {row["task_id"] for row in results}
     n_sample = int(meta.get("n_sample", max((row["sample_idx"] for row in results), default=0) + 1))
     missing = sorted(set(by_id) - seen)
@@ -135,12 +146,11 @@ def score_run(
     coverage_complete = not missing and len(results) == expected_rollouts
     if not coverage_complete:
         print(
-            f"[warn] incomplete coverage: {len(seen)}/{len(records)} tasks, {len(results)}/{expected_rollouts} "
-            "rollouts; this is not a complete result",
+            f"[warn] {name}: incomplete coverage: {len(seen)}/{len(records)} tasks, "
+            f"{len(results)}/{expected_rollouts} rollouts; this is not a complete result",
             flush=True,
         )
 
-    # Truncated rollouts and fallback extraction paths both depress the score, so surface them.
     finish_reasons = dict(Counter(str(row["finish_reason"]) for row in results if row.get("finish_reason")))
     extract_sources = dict(Counter(str(row["extract_source"]) for row in results if row.get("extract_source")))
     truncated = sum(finish_reasons.get(reason, 0) for reason in ("length", "prompt_length_exceeded"))
@@ -149,11 +159,12 @@ def score_run(
     summary = summarize(
         results,
         n_sample=n_sample,
-        k_list=meta.get("k_list") or default_k_list(n_sample),
+        k_list=default_k_list(n_sample),
         extra={
-            "bench": meta.get("bench", "aime"),
+            "test_set": name,
+            "bench": bench_name,
             "model_name": meta.get("model_name"),
-            "judge": judge,
+            "judge": effective_judge,
             "judge_model": judge_model,
             "temperature": meta.get("temperature"),
             "top_p": meta.get("top_p"),
@@ -169,7 +180,7 @@ def score_run(
             "extract_sources": extract_sources,
             "truncated_rollouts": truncated,
             "invalid_rollouts": invalid,
-            "sample_ratio": meta.get("sample_ratio"),
+            "sample_ratio": test_set.get("sample_ratio", meta.get("sample_ratio")),
             "selected_task_count": len(records),
         },
     )
@@ -187,7 +198,7 @@ def score_run(
             for modality, rows in sorted(groups.items())
         }
 
-    if judge == "llm":
+    if effective_judge == "llm":
         agree = sum(1 for row in results if bool(row["rule_correct"]) == bool(row["correct"]))
         summary["rule_vs_llm_agreement"] = agree / len(results)
         unparsed = sum(1 for row in results if not row.get("judge_parsed", True))
@@ -196,56 +207,137 @@ def score_run(
         summary["judge_verdict_unparsed"] = verdict_unparsed / len(results)
         if verdict_unparsed:
             print(
-                f"[warn] {verdict_unparsed}/{len(results)} judge replies had no extractable verdict; "
+                f"[warn] {name}: {verdict_unparsed}/{len(results)} judge replies had no extractable verdict; "
                 "all three fallbacks missed, they count as wrong",
                 flush=True,
             )
         if unparsed:
             print(
-                f"[warn] {unparsed}/{len(results)} judge calls returned no verdict and count as wrong; "
+                f"[warn] {name}: {unparsed}/{len(results)} judge calls returned no verdict and count as wrong; "
                 "this depresses the score -- raise the judge max_tokens and re-run",
                 flush=True,
             )
+    return summary, results, effective_judge, judge_model
+
+
+def _overall(per_set: dict[str, dict], results: list[dict]) -> dict[str, Any]:
+    total = len(results)
+    correct = sum(1 for row in results if row.get("correct"))
+    finish_reasons = dict(Counter(str(row["finish_reason"]) for row in results if row.get("finish_reason")))
+    extract_sources = dict(Counter(str(row["extract_source"]) for row in results if row.get("extract_source")))
+
+    def _sum(key: str) -> int:
+        return sum(int(summary.get(key, 0)) for summary in per_set.values())
+
+    return {
+        "num_test_sets": len(per_set),
+        "num_tasks": sum(summary.get("num_tasks", 0) for summary in per_set.values()),
+        "num_rollouts": total,
+        "Pass@1": correct / total if total else 0.0,
+        "score": correct / total if total else 0.0,
+        "coverage_complete": all(summary.get("coverage_complete") for summary in per_set.values()),
+        "expected_tasks": _sum("expected_tasks"),
+        "expected_rollouts": _sum("expected_rollouts"),
+        "missing_tasks": _sum("missing_tasks"),
+        "truncated_rollouts": _sum("truncated_rollouts"),
+        "invalid_rollouts": _sum("invalid_rollouts"),
+        "extract_failed": sum(1 for row in results if row.get("extract_failed", row.get("pred") is None)) / total if total else 0.0,
+        "finish_reasons": finish_reasons,
+        "extract_sources": extract_sources,
+    }
+
+
+def score_run(
+    out_dir: str,
+    *,
+    judge: str = "auto",
+    judge_concurrency: int = 8,
+    data_file: str | None = None,
+    verbose: bool = True,
+) -> int:
+    meta_path = os.path.join(out_dir, "meta.json")
+    if not os.path.isfile(meta_path):
+        raise SystemExit(f"missing {meta_path}; run run_eval.py first (score.py scores a generation run)")
+    with open(meta_path) as handle:
+        meta = json.load(handle)
+
+    test_sets = _normalize_test_sets(meta)
+    if data_file and len(test_sets) != 1:
+        raise SystemExit("--data-file can only override a single-test-set task")
+
+    rollouts = load_raw(out_dir)
+    if rollouts and not any("test_set" in row for row in rollouts) and len(test_sets) == 1:
+        # Legacy output: all rows belong to the single test set.
+        for row in rollouts:
+            row["test_set"] = test_sets[0]["name"]
+
+    legacy_selected = meta.get("selected_task_ids")
+    per_set: dict[str, dict] = {}
+    all_results: list[dict] = []
+    for test_set in test_sets:
+        summary, results, effective_judge, _ = _score_test_set(
+            test_set,
+            meta,
+            rollouts,
+            judge=judge,
+            judge_concurrency=judge_concurrency,
+            data_file_override=data_file if len(test_sets) == 1 else None,
+            legacy_selected=legacy_selected if len(test_sets) == 1 else None,
+        )
+        per_set[test_set["name"]] = summary
+        all_results.extend(results)
+
+    if not all_results:
+        raise SystemExit(f"no rollout at all in {out_dir}/raw_rank*.jsonl; refusing to emit an empty score")
+
+    summary = {
+        "task": meta.get("task") or meta.get("tag") or os.path.basename(os.path.normpath(out_dir)),
+        "model_name": meta.get("model_name"),
+        "judge": judge,
+        "num_test_sets": len(per_set),
+        "n_sample": meta.get("n_sample"),
+        "temperature": meta.get("temperature"),
+        "top_p": meta.get("top_p"),
+        "max_tokens": meta.get("max_tokens"),
+        "reasoning_effort": meta.get("reasoning_effort"),
+        "test_sets": per_set,
+        "overall": _overall(per_set, all_results),
+    }
 
     os.makedirs(out_dir, exist_ok=True)
-    write_jsonl(os.path.join(out_dir, "scored.jsonl"), results)
-    with open(os.path.join(out_dir, "summary.json"), "w") as f:
-        json.dump(summary, f, indent=2, ensure_ascii=False)
+    write_jsonl(os.path.join(out_dir, "scored.jsonl"), all_results)
+    with open(os.path.join(out_dir, "summary.json"), "w") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
 
     try:
-        report_path = write_report(out_dir, summary, results)
+        report_path = write_report(out_dir, summary, all_results)
         if verbose:
             print(f"wrote {report_path}")
     except Exception as exc:  # report must never break scoring
         print(f"[warn] failed to write report.html: {type(exc).__name__}: {exc}", flush=True)
 
     if verbose:
-        print_report(summary, title=f"{summary['bench']}  {summary.get('model_name')}  judge={judge}")
-        print(
-            f"coverage: expected {summary['expected_rollouts']} rollouts / "
-            f"{summary['expected_tasks']} tasks, got {summary['num_rollouts']} / {summary['num_tasks']}, "
-            f"complete={summary['coverage_complete']}"
-        )
-        print(f"finish_reason={summary['finish_reasons']}")
-        for key, stat in (summary.get("by_modality") or {}).items():
-            print(f"  Pass@1[{key}] = {stat['Pass@1'] * 100:6.2f}  (tasks={stat['num_tasks']})")
-        if summary["extract_sources"]:
-            print(f"extract_source={summary['extract_sources']}")
-        if summary["truncated_rollouts"] or summary["invalid_rollouts"]:
+        for name, set_summary in per_set.items():
+            print_report(set_summary, title=f"{name}  {set_summary.get('model_name')}  judge={set_summary.get('judge')}")
             print(
-                f"[warn] {summary['truncated_rollouts']} truncated / "
-                f"{summary['invalid_rollouts']} invalid rollouts, all counted as wrong; "
-                "this depresses the score"
+                f"  coverage: expected {set_summary['expected_rollouts']} rollouts / "
+                f"{set_summary['expected_tasks']} tasks, got {set_summary['num_rollouts']} / "
+                f"{set_summary['num_tasks']}, complete={set_summary['coverage_complete']}"
             )
-        print(f"extract_failed={summary['extract_failed'] * 100:.2f}%")
-        if "rule_vs_llm_agreement" in summary:
-            print(f"rule vs llm agreement = {summary['rule_vs_llm_agreement'] * 100:.2f}%")
+            print(f"  finish_reason={set_summary['finish_reasons']}")
+            print(f"  extract_failed={set_summary['extract_failed'] * 100:.2f}%")
+        overall = summary["overall"]
+        print(
+            f"overall: test_sets={overall['num_test_sets']} tasks={overall['num_tasks']} "
+            f"rollouts={overall['num_rollouts']} Pass@1={overall['Pass@1'] * 100:.2f}% "
+            f"complete={overall['coverage_complete']}"
+        )
         print(f"wrote {os.path.join(out_dir, 'scored.jsonl')} / summary.json")
     return 0
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="score a benchmark run and summarize Pass@k")
+    parser = argparse.ArgumentParser(description="score one task (one or more test sets) and summarize Pass@k")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument(
         "--judge", choices=["auto", "rule", "llm"], default="auto", help="auto: rule by default, except HLE which uses llm"
@@ -254,7 +346,7 @@ def main() -> int:
     parser.add_argument(
         "--check", choices=["rule", "llm"], default=None, help="override judge mode; default: rule, except HLE which uses llm"
     )
-    parser.add_argument("--data-file", default=None, help="override meta.json's data_file")
+    parser.add_argument("--data-file", default=None, help="override meta.json's data_file (single test set only)")
     args = parser.parse_args()
     judge = args.check or args.judge
     return score_run(

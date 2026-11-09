@@ -25,7 +25,7 @@ _EXTRACT_ZH = {
     "tail_letter": "末尾字母",
     "none": "未抽取到",
 }
-_JUDGE_ZH = {"rule": "规则", "llm": "裁判", "auto": "自动"}
+_JUDGE_ZH = {"rule": "规则", "llm": "裁判", "auto": "自动（按测试集）"}
 
 _STYLE = """
 :root { color-scheme: light; }
@@ -40,7 +40,8 @@ body {
 }
 main { max-width: 1100px; margin: 0 auto; }
 h1 { font-size: 22px; margin: 0 0 4px; }
-h2 { font-size: 16px; margin: 28px 0 10px; }
+h2 { font-size: 17px; margin: 30px 0 10px; padding-top: 8px; border-top: 1px solid #e3e6eb; }
+h3 { font-size: 14px; margin: 18px 0 8px; color: #424852; }
 .muted { color: #646a73; font-size: 13px; }
 .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 8px; font-size: 13px; }
 .meta span { color: #424852; }
@@ -133,51 +134,35 @@ def _excerpt(raw: Any, limit: int = 200) -> str:
     return _e(" ".join(str("" if raw is None else raw).split())[:limit])
 
 
-def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, Any]]) -> str:
-    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-
-    meta_items: list[tuple[str, str]] = [
-        ("基准", _val(summary.get("bench"))),
-        ("模型", _val(summary.get("model_name"))),
-        ("判分方式", _judge_zh(summary.get("judge"))),
-        ("采样比例", _val(summary.get("sample_ratio"))),
-        ("生成时间", _val(generated)),
-    ]
-    if summary.get("judge_model"):
-        meta_items.append(("判题模型", _val(summary.get("judge_model"))))
-    meta_html = "".join(f"<span><b>{_e(label)}</b>: {value}</span>" for label, value in meta_items)
-
-    cards = [
-        ("Pass@1", _pct(summary.get("Pass@1"))),
-        ("平均得分", _pct(summary.get("score"))),
-        ("题目数", _val(summary.get("num_tasks"))),
-        ("样本数", _val(summary.get("num_rollouts"))),
-        ("每题采样", _val(summary.get("n_sample"))),
-        ("覆盖率完整", _bool_zh(summary.get("coverage_complete"))),
-    ]
-    cards_html = "".join(
+def _cards(items: list[tuple[str, str]], heading: str | None = None) -> str:
+    body = "".join(
         f'<div class="card"><div class="label">{_e(label)}</div><div class="value">{value}</div></div>'
-        for label, value in cards
+        for label, value in items
     )
+    head = f"<h3>{_e(heading)}</h3>" if heading else ""
+    return f'{head}<div class="cards">{body}</div>'
 
-    def _pass_order(key: Any) -> tuple[int, str]:
+
+def _pass_html(summary: dict[str, Any]) -> str:
+    def _order(key: Any) -> tuple[int, str]:
         suffix = str(key).split("@", 1)[1]
         return (int(suffix), str(key)) if suffix.isdigit() else (1 << 30, str(key))
 
-    pass_keys = sorted((key for key in summary if str(key).startswith("Pass@")), key=_pass_order)
-    if pass_keys:
-        pass_html = (
-            "<table><thead><tr><th>指标</th><th>柱状图</th><th>数值</th></tr></thead><tbody>"
-            + "".join(
-                f"<tr><td><b>{_e(key)}</b></td><td>{_bar(summary.get(key))}</td><td>{_pct(summary.get(key))}</td></tr>"
-                for key in pass_keys
-            )
-            + "</tbody></table>"
+    keys = sorted((key for key in summary if str(key).startswith("Pass@")), key=_order)
+    if not keys:
+        return '<p class="muted">没有 Pass@k 指标。</p>'
+    return (
+        "<table><thead><tr><th>指标</th><th>柱状图</th><th>数值</th></tr></thead><tbody>"
+        + "".join(
+            f"<tr><td><b>{_e(key)}</b></td><td>{_bar(summary.get(key))}</td><td>{_pct(summary.get(key))}</td></tr>"
+            for key in keys
         )
-    else:
-        pass_html = '<p class="muted">汇总中没有 Pass@k 指标。</p>'
+        + "</tbody></table>"
+    )
 
-    diag_items: list[tuple[str, str]] = [
+
+def _diag_items(summary: dict[str, Any]) -> list[tuple[str, str]]:
+    items: list[tuple[str, str]] = [
         ("结束原因分布", _kv(_map_keys(summary.get("finish_reasons"), _FINISH_ZH))),
         ("答案抽取来源", _kv(_map_keys(summary.get("extract_sources"), _EXTRACT_ZH))),
         ("截断样本数", _val(summary.get("truncated_rollouts"))),
@@ -188,15 +173,20 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
         ("裁判结论未解析率", _pct(summary.get("judge_verdict_unparsed"))),
     ]
     if summary.get("expected_tasks") is not None:
-        diag_items.append(("期望题目数", _val(summary.get("expected_tasks"))))
+        items.append(("期望题目数", _val(summary.get("expected_tasks"))))
     if summary.get("expected_rollouts") is not None:
-        diag_items.append(("期望样本数", _val(summary.get("expected_rollouts"))))
+        items.append(("期望样本数", _val(summary.get("expected_rollouts"))))
     if summary.get("missing_tasks"):
-        diag_items.append(("缺失题目数", _val(summary.get("missing_tasks"))))
-    diag_html = '<div class="diag">' + "".join(
-        f"<div><b>{_e(label)}</b>{value}</div>" for label, value in diag_items
-    ) + "</div>"
+        items.append(("缺失题目数", _val(summary.get("missing_tasks"))))
+    return items
 
+
+def _diag_html(summary: dict[str, Any], heading: str = "诊断信息") -> str:
+    body = "".join(f"<div><b>{_e(label)}</b>{value}</div>" for label, value in _diag_items(summary))
+    return f'<h3>{_e(heading)}</h3><div class="diag">{body}</div>'
+
+
+def _task_table(summary: dict[str, Any], results: list[dict]) -> str:
     counts: dict[str, int] = {}
     corrects: dict[str, int] = {}
     for row in results:
@@ -208,17 +198,19 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
     if not isinstance(accuracy, dict) or not accuracy:
         accuracy = {tid: corrects[tid] / counts[tid] for tid in counts}
 
-    task_table = (
-        f"<details><summary>逐题正确率（共 {len(accuracy)} 题）</summary>"
+    rows = "".join(
+        f"<tr><td class='mono'>{_e(tid)}</td><td>{_bar(accuracy.get(tid, 0.0))}</td>"
+        f"<td>{_pct(accuracy.get(tid, 0.0))}</td><td>{_val(counts.get(tid, 0))}</td></tr>"
+        for tid in sorted(accuracy)
+    )
+    return (
+        f"<h3>逐题正确率</h3><details><summary>展开（共 {len(accuracy)} 题）</summary>"
         "<table><thead><tr><th>题目</th><th>柱状图</th><th>正确率</th><th>样本数</th></tr></thead><tbody>"
-        + "".join(
-            f"<tr><td class='mono'>{_e(tid)}</td><td>{_bar(accuracy.get(tid, 0.0))}</td>"
-            f"<td>{_pct(accuracy.get(tid, 0.0))}</td><td>{_val(counts.get(tid, 0))}</td></tr>"
-            for tid in sorted(accuracy)
-        )
-        + "</tbody></table></details>"
+        f"{rows}</tbody></table></details>"
     )
 
+
+def _problem_html(results: list[dict]) -> str:
     problems = [
         row
         for row in results
@@ -228,7 +220,9 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
     ]
     problems.sort(key=lambda row: (str(row.get("task_id")), str(row.get("sample_idx"))))
     shown = problems[:_MAX_PROBLEM_ROWS]
-    problem_rows = "".join(
+    if not problems:
+        return '<h3>异常 / 翻车样本</h3><p class="muted">没有异常或错误的样本。</p>'
+    rows = "".join(
         "<tr>"
         f"<td class='mono'>{_e(row.get('task_id'))}</td>"
         f"<td>{_e(row.get('sample_idx'))}</td>"
@@ -241,23 +235,87 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
         "</tr>"
         for row in shown
     )
-    if problems:
-        note = (
-            f"<p class='muted'>仅显示前 {_MAX_PROBLEM_ROWS} 条，共 {len(problems)} 条问题样本</p>"
-            if len(problems) > _MAX_PROBLEM_ROWS
-            else ""
-        )
-        problem_html = (
-            note
-            + "<table><thead><tr>"
-            "<th>题目</th><th>样本序号</th><th>是否正确</th><th>预测</th><th>标准答案</th>"
-            "<th>抽取来源</th><th>结束原因</th><th>输出摘录</th>"
-            "</tr></thead><tbody>"
-            + problem_rows
-            + "</tbody></table>"
-        )
-    else:
-        problem_html = "<p class='muted'>没有异常或错误的样本。</p>"
+    note = (
+        f"<p class='muted'>仅显示前 {_MAX_PROBLEM_ROWS} 条，共 {len(problems)} 条问题样本</p>"
+        if len(problems) > _MAX_PROBLEM_ROWS
+        else ""
+    )
+    return (
+        "<h3>异常 / 翻车样本</h3>"
+        + note
+        + "<table><thead><tr>"
+        "<th>题目</th><th>样本序号</th><th>是否正确</th><th>预测</th><th>标准答案</th>"
+        "<th>抽取来源</th><th>结束原因</th><th>输出摘录</th>"
+        "</tr></thead><tbody>"
+        + rows
+        + "</tbody></table>"
+    )
+
+
+def _set_section(name: str, summary: dict[str, Any], results: list[dict]) -> str:
+    cards = _cards(
+        [
+            ("Pass@1", _pct(summary.get("Pass@1"))),
+            ("平均得分", _pct(summary.get("score"))),
+            ("题目数", _val(summary.get("num_tasks"))),
+            ("样本数", _val(summary.get("num_rollouts"))),
+            ("每题采样", _val(summary.get("n_sample"))),
+            ("采样比例", _val(summary.get("sample_ratio"))),
+            ("判分方式", _judge_zh(summary.get("judge"))),
+            ("覆盖率完整", _bool_zh(summary.get("coverage_complete"))),
+        ]
+    )
+    subtitle = f"bench: {_e(summary.get('bench'))} · judge: {_e(summary.get('judge'))}"
+    return (
+        f"<h2>测试集：{_e(name)}</h2>"
+        f'<div class="muted">{subtitle}</div>'
+        f"{cards}"
+        f"<h3>Pass@k</h3>{_pass_html(summary)}"
+        f"{_diag_html(summary)}"
+        f"{_task_table(summary, results)}"
+        f"{_problem_html(results)}"
+    )
+
+
+def _overall_section(overall: dict[str, Any]) -> str:
+    cards = _cards(
+        [
+            ("Pass@1（合并）", _pct(overall.get("Pass@1"))),
+            ("平均得分", _pct(overall.get("score"))),
+            ("测试集数", _val(overall.get("num_test_sets"))),
+            ("题目数", _val(overall.get("num_tasks"))),
+            ("样本数", _val(overall.get("num_rollouts"))),
+            ("覆盖率完整", _bool_zh(overall.get("coverage_complete"))),
+        ]
+    )
+    return f"<h2>总体</h2>{cards}{_diag_html(overall, heading='总体诊断')}"
+
+
+def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, Any]]) -> str:
+    generated = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    test_sets = summary.get("test_sets")
+    if not isinstance(test_sets, dict) or not test_sets:
+        name = summary.get("bench") or "test_set"
+        test_sets = {name: summary}
+
+    meta_items: list[tuple[str, str]] = [
+        ("任务", _val(summary.get("task"))),
+        ("模型", _val(summary.get("model_name"))),
+        ("判分方式", _judge_zh(summary.get("judge"))),
+        ("测试集", _e(", ".join(sorted(test_sets)))),
+        ("生成时间", _val(generated)),
+    ]
+    meta_html = "".join(f"<span><b>{_e(label)}</b>: {value}</span>" for label, value in meta_items)
+
+    sections: list[str] = []
+    overall = summary.get("overall")
+    if isinstance(overall, dict) and len(test_sets) > 1:
+        sections.append(_overall_section(overall))
+    for name in sorted(test_sets):
+        set_summary = test_sets[name]
+        set_results = [row for row in results if str(row.get("test_set", name)) == name]
+        sections.append(_set_section(name, set_summary, set_results))
 
     doc = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -272,15 +330,7 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
 <h1>评分报告</h1>
 <div class="muted">{_e(summary.get("model_name"))}</div>
 <div class="meta">{meta_html}</div>
-<div class="cards">{cards_html}</div>
-<h2>Pass@k 指标</h2>
-{pass_html}
-<h2>诊断信息</h2>
-{diag_html}
-<h2>逐题正确率</h2>
-{task_table}
-<h2>异常 / 翻车样本</h2>
-{problem_html}
+{''.join(sections)}
 </main>
 </body>
 </html>

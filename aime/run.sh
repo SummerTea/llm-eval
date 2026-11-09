@@ -14,22 +14,26 @@ TEMPERATURE="${TEMPERATURE:-1.0}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
 RATIO="${RATIO:-}"
 SUFFIX="${RATIO:+_r${RATIO}}"
-TAG="${TAG:-${MODEL//\//_}-n${N_SAMPLE}-r${RATIO:-full}-$(date -u +%Y%m%dT%H%M%SZ)}"
 DATA_FILE="${DATA_FILE:-${EVAL_DIR}/data/aime_2026${SUFFIX}.jsonl}"
-OUT="${EVAL_DIR}/outputs/aime-${TAG}"
+TASK="${TASK:-${MODEL//\//_}-n${N_SAMPLE}-r${RATIO:-full}-$(date -u +%Y%m%dT%H%M%SZ)}"
+OUT="${EVAL_DIR}/outputs/${TASK}"
 TEXT_ONLY="${TEXT_ONLY:-0}"
 CHECK="${CHECK:-}"
+MAX_TOKENS="${MAX_TOKENS:-}"
+LIMIT="${LIMIT:-}"
+CONCURRENCY="${CONCURRENCY:-16}"
 
-ARGS=(--bench aime --data-file "${DATA_FILE}" --model "${MODEL}" --n-sample "${N_SAMPLE}" --temperature "${TEMPERATURE}" --tag "${TAG}")
+ARGS=(--task "${TASK}" --test-set "aime:${DATA_FILE}" --model "${MODEL}" \
+    --n-sample "${N_SAMPLE}" --temperature "${TEMPERATURE}" --concurrency "${CONCURRENCY}")
 [ -n "${REASONING_EFFORT}" ] && ARGS+=(--reasoning-effort "${REASONING_EFFORT}")
+[ -n "${MAX_TOKENS}" ] && ARGS+=(--max-tokens "${MAX_TOKENS}")
+[ -n "${LIMIT}" ] && ARGS+=(--limit "${LIMIT}")
 [ "${TEXT_ONLY}" = "1" ] && ARGS+=(--text-only)
 
-echo "[aime] model=${MODEL} n_sample=${N_SAMPLE} ratio=${RATIO:-full} check=${CHECK:-auto} text_only=${TEXT_ONLY} -> ${OUT}"
+echo "[aime] task=${TASK} model=${MODEL} n_sample=${N_SAMPLE} ratio=${RATIO:-full} check=${CHECK:-auto} -> ${OUT}"
 
-# 1) inference (needs LLM_EVAL_BASE_URL / LLM_EVAL_API_KEY / LLM_EVAL_MODEL, or pass --base-url/--api-key/--model)
 python "${EVAL_DIR}/run_eval.py" "${ARGS[@]}"
 
-# 2) evaluate (judge env only needed when the effective check is llm: HLE always; others only with CHECK=llm)
 SCORE_ARGS=(--out-dir "${OUT}" --judge-concurrency 16)
 [ -n "${CHECK}" ] && SCORE_ARGS+=(--check "${CHECK}")
 python "${EVAL_DIR}/score.py" "${SCORE_ARGS[@]}"

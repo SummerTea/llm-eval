@@ -264,12 +264,12 @@ def write_report(out_dir: str, summary: dict[str, Any], results: list[dict[str, 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{_e(summary.get("bench"))} 评分报告</title>
+<title>评分报告</title>
 <style>{_STYLE}</style>
 </head>
 <body>
 <main>
-<h1>{_e(summary.get("bench"))} 评分报告</h1>
+<h1>评分报告</h1>
 <div class="muted">{_e(summary.get("model_name"))}</div>
 <div class="meta">{meta_html}</div>
 <div class="cards">{cards_html}</div>

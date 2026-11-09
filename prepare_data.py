@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import io
 import json
 import random
@@ -20,6 +21,69 @@ DATASETS = {
 }
 EXPECTED_ROWS = {"aime": 30, "gpqa": 198, "hle": 2500}
 OUTPUT_NAME = {"aime": "aime_2026.jsonl", "gpqa": "gpqa_diamond.jsonl", "hle": "hle_test.jsonl"}
+
+SAMPLE_SEED = 20260101
+DEFAULT_RATIOS = "0.01,0.1,0.2"
+
+
+def _manifest_path(jsonl_path: Path) -> Path:
+    return Path(str(jsonl_path) + ".meta.json")
+
+
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with open(path) as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def _read_manifest(path: Path) -> dict[str, Any]:
+    if not path.is_file():
+        return {}
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_manifest(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(data, handle, ensure_ascii=False, indent=2)
+
+
+def _sample_key(task_id: str) -> bytes:
+    return hashlib.sha256(f"{SAMPLE_SEED}:{task_id}".encode()).digest()
+
+
+def _task_ids_sha(records: list[dict]) -> str:
+    return hashlib.sha256("\n".join(sorted(r["task_id"] for r in records)).encode()).hexdigest()
+
+
+def _ratio_path(full_path: Path, ratio: float) -> Path:
+    if ratio >= 1.0:
+        return full_path
+    return full_path.with_name(f"{full_path.stem}_r{ratio:g}{full_path.suffix}")
+
+
+def _select(records: list[dict[str, Any]], ratio: float) -> list[dict[str, Any]]:
+    if ratio >= 1.0:
+        return records
+    keep_n = max(1, round(ratio * len(records)))
+    ranked = sorted(records, key=lambda record: _sample_key(record["task_id"]))
+    keep = {record["task_id"] for record in ranked[:keep_n]}
+    return [record for record in records if record["task_id"] in keep]
+
+
+def _raw_ready(raw_dir: Path) -> bool:
+    if not raw_dir.is_dir():
+        return False
+    return any(raw_dir.rglob("*.parquet")) or any(raw_dir.rglob("*.jsonl"))
 
 
 def _download(dataset_id: str, dest: Path) -> Path:
@@ -182,37 +246,151 @@ def convert_hle(
 CONVERTERS = {"aime": convert_aime, "gpqa": convert_gpqa, "hle": convert_hle}
 
 
-def prepare(bench: str, dest: Path, *, force: bool, no_images: bool) -> int:
-    out_path = dest / OUTPUT_NAME[bench]
-    if out_path.is_file() and not force:
-        print(f"[{bench}] exists, skip: {out_path} (use --force to rebuild)", flush=True)
-        return 0
+def ensure_full(
+    bench: str, dest: Path, *, force: bool, no_images: bool, allow_partial: bool
+) -> tuple[Path, list[dict[str, Any]]]:
+    full_path = dest / OUTPUT_NAME[bench]
+    manifest_path = _manifest_path(full_path)
+    if not force and full_path.is_file():
+        manifest = _read_manifest(manifest_path)
+        if manifest.get("sample_ratio") == 1.0 and manifest.get("no_images") == no_images:
+            try:
+                records = _read_jsonl(full_path)
+            except (OSError, ValueError):
+                records = None
+            if (
+                records is not None
+                and manifest.get("num_tasks") == len(records)
+                and manifest.get("task_ids_sha256") == _task_ids_sha(records)
+            ):
+                if manifest.get("partial"):
+                    print(f"[{bench}] reusing a PARTIAL dataset (allow-partial was used)", flush=True)
+                return full_path, records
+        print(f"[{bench}] full JSONL/manifest mismatch, rebuilding", flush=True)
 
-    print(f"[{bench}] downloading {DATASETS[bench]} ...", flush=True)
-    raw_dir = _download(DATASETS[bench], dest / "_raw" / bench)
+    raw_dir = dest / "_raw" / bench
+    # Download only when the raw cache is missing; --force rebuilds from the existing cache.
+    if not _raw_ready(raw_dir):
+        print(f"[{bench}] downloading {DATASETS[bench]} ...", flush=True)
+        raw_dir = _download(DATASETS[bench], raw_dir)
     rows = _read_rows(raw_dir)
     converted = CONVERTERS[bench](rows, dest=dest, no_images=no_images)
     if not converted:
         raise SystemExit(f"[{bench}] converted 0 rows from {raw_dir}")
 
     expected = EXPECTED_ROWS[bench]
-    if not no_images and len(converted) != expected:
-        print(f"[{bench}] warning: converted {len(converted)} rows, expected {expected}", flush=True)
+    partial = False
+    text_only_hle = bench == "hle" and no_images
+    if not text_only_hle and len(converted) != expected:
+        message = f"[{bench}] converted {len(converted)} rows, expected {expected}; the raw download may be incomplete"
+        if allow_partial:
+            print(f"{message} (continuing: --allow-partial)", flush=True)
+            partial = True
+        else:
+            raise SystemExit(f"{message}\nDelete {raw_dir} and retry, or pass --allow-partial to continue")
 
-    _write_jsonl(out_path, converted)
-    print(f"[{bench}] wrote {len(converted)} rows -> {out_path}", flush=True)
-    return len(converted)
+    _write_jsonl(full_path, converted)
+    _write_manifest(
+        manifest_path,
+        {
+            "bench": bench,
+            "dataset_id": DATASETS[bench],
+            "sample_ratio": 1.0,
+            "no_images": no_images,
+            "num_tasks": len(converted),
+            "task_ids_sha256": _task_ids_sha(converted),
+            "partial": partial,
+        },
+    )
+    return full_path, converted
+
+
+def derive_ratios(
+    bench: str,
+    full_path: Path,
+    full_records: list[dict[str, Any]],
+    ratios: list[float],
+    *,
+    force: bool,
+    no_images: bool,
+) -> list[tuple[Path, int]]:
+    full_sha = _task_ids_sha(full_records)
+    full_manifest = _read_manifest(_manifest_path(full_path))
+    source_partial = bool(full_manifest.get("partial"))
+    if source_partial:
+        print(f"[{bench}] warning: deriving ratios from a PARTIAL full dataset", flush=True)
+    made: list[tuple[Path, int]] = []
+    for ratio in ratios:
+        if ratio >= 1.0:
+            continue
+        path = _ratio_path(full_path, ratio)
+        mpath = _manifest_path(path)
+        if not force and path.is_file():
+            manifest = _read_manifest(mpath)
+            if (
+                manifest.get("sample_ratio") == ratio
+                and manifest.get("no_images") == no_images
+                and manifest.get("source_full_task_ids_sha256") == full_sha
+            ):
+                print(f"[{bench}] ratio {ratio:g} exists, skip: {path}", flush=True)
+                continue
+        selected = _select(full_records, ratio)
+        _write_jsonl(path, selected)
+        _write_manifest(
+            mpath,
+            {
+                "bench": bench,
+                "dataset_id": DATASETS[bench],
+                "sample_ratio": ratio,
+                "no_images": no_images,
+                "num_tasks": len(selected),
+                "task_ids_sha256": _task_ids_sha(selected),
+                "source_full_task_ids_sha256": full_sha,
+                "source_full_partial": source_partial,
+            },
+        )
+        made.append((path, len(selected)))
+    return made
+
+
+def prepare(
+    bench: str, dest: Path, *, ratios: list[float], force: bool, no_images: bool, allow_partial: bool
+) -> tuple[int, int]:
+    full_path, full_records = ensure_full(
+        bench, dest, force=force, no_images=no_images, allow_partial=allow_partial
+    )
+    print(f"[{bench}] full: {len(full_records)} rows -> {full_path}", flush=True)
+    made = derive_ratios(bench, full_path, full_records, ratios, force=force, no_images=no_images)
+    for path, count in made:
+        print(f"[{bench}] ratio copy: {count} rows -> {path}", flush=True)
+    return len(full_records), len(made)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="download benchmark datasets from ModelScope and convert to jsonl")
+    parser = argparse.ArgumentParser(
+        description="download full benchmark datasets from ModelScope once and write deterministic ratio copies"
+    )
     parser.add_argument("--dest", default=str(DEFAULT_DEST))
     parser.add_argument("--benches", default="aime,gpqa,hle", help="comma-separated subset of aime,gpqa,hle")
-    parser.add_argument("--force", action="store_true", help="rebuild even when the output already exists")
+    parser.add_argument(
+        "--sample-ratios",
+        default=DEFAULT_RATIOS,
+        help="comma-separated ratios to generate as physical copies (default 0.01,0.1,0.2); the full dataset is always kept",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild even when the output already exists (does not re-download when the raw cache exists)",
+    )
     parser.add_argument(
         "--no-images",
         action="store_true",
-        help="skip HLE image questions entirely (smaller data dir; use with run_eval --text-only)",
+        help="skip HLE image questions entirely (text-only full dataset; ratios derive from it)",
+    )
+    parser.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="warn instead of failing when the full dataset row count differs from the expected count",
     )
     args = parser.parse_args()
 
@@ -222,10 +400,33 @@ def main() -> int:
     if unknown:
         parser.error(f"unknown benchmark: {unknown}; expected aime,gpqa,hle")
 
-    total = 0
+    ratios: list[float] = []
+    for value in (item.strip() for item in args.sample_ratios.split(",")):
+        if not value:
+            continue
+        try:
+            ratio = float(value)
+        except ValueError:
+            parser.error(f"--sample-ratios must be numbers: {value!r}")
+        if not (0 < ratio <= 1):
+            parser.error(f"--sample-ratios must be in (0, 1]: {value!r}")
+        if ratio not in ratios:
+            ratios.append(ratio)
+
+    full_total = 0
+    made_total = 0
     for bench in benches:
-        total += prepare(bench, dest, force=args.force, no_images=args.no_images)
-    print(f"[done] {total} rows under {dest}", flush=True)
+        full_count, made_count = prepare(
+            bench,
+            dest,
+            ratios=ratios,
+            force=args.force,
+            no_images=args.no_images,
+            allow_partial=args.allow_partial,
+        )
+        full_total += full_count
+        made_total += made_count
+    print(f"[done] {full_total} full rows, {made_total} ratio copies under {dest}", flush=True)
     return 0
 
 

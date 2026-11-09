@@ -15,6 +15,7 @@ if str(EVAL_DIR) not in sys.path:
 from common.io import read_jsonl, write_jsonl  # noqa: E402
 from common.loader import load_bench  # noqa: E402
 from common.passk import default_k_list, print_report, summarize  # noqa: E402
+from common.report import write_report  # noqa: E402
 
 # Default judge per benchmark: rule judging is the default, except HLE which requires an LLM judge.
 BENCH_DEFAULT_JUDGE = {"aime": "rule", "hle": "llm", "gpqa": "rule"}
@@ -210,6 +211,13 @@ def score_run(
     write_jsonl(os.path.join(out_dir, "scored.jsonl"), results)
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
+
+    try:
+        report_path = write_report(out_dir, summary, results)
+        if verbose:
+            print(f"wrote {report_path}")
+    except Exception as exc:  # report must never break scoring
+        print(f"[warn] failed to write report.html: {type(exc).__name__}: {exc}", flush=True)
 
     if verbose:
         print_report(summary, title=f"{summary['bench']}  {summary.get('model_name')}  judge={judge}")

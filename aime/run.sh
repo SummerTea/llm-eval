@@ -12,18 +12,19 @@ fi
 N_SAMPLE="${N_SAMPLE:-32}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 REASONING_EFFORT="${REASONING_EFFORT:-}"
-TAG="${TAG:-${MODEL//\//_}-n${N_SAMPLE}}"
-DATA_FILE="${DATA_FILE:-${EVAL_DIR}/data/aime_2026.jsonl}"
+RATIO="${RATIO:-}"
+SUFFIX="${RATIO:+_r${RATIO}}"
+TAG="${TAG:-${MODEL//\//_}-n${N_SAMPLE}-r${RATIO:-full}-$(date -u +%Y%m%dT%H%M%SZ)}"
+DATA_FILE="${DATA_FILE:-${EVAL_DIR}/data/aime_2026${SUFFIX}.jsonl}"
 OUT="${EVAL_DIR}/outputs/aime/${TAG}"
 TEXT_ONLY="${TEXT_ONLY:-0}"
-SAMPLE_RATIO="${SAMPLE_RATIO:-1.0}"
 CHECK="${CHECK:-}"
 
-ARGS=(--bench aime --data-file "${DATA_FILE}" --model "${MODEL}" --n-sample "${N_SAMPLE}" --temperature "${TEMPERATURE}" --tag "${TAG}" --sample-ratio "${SAMPLE_RATIO}")
+ARGS=(--bench aime --data-file "${DATA_FILE}" --model "${MODEL}" --n-sample "${N_SAMPLE}" --temperature "${TEMPERATURE}" --tag "${TAG}")
 [ -n "${REASONING_EFFORT}" ] && ARGS+=(--reasoning-effort "${REASONING_EFFORT}")
 [ "${TEXT_ONLY}" = "1" ] && ARGS+=(--text-only)
 
-echo "[aime] model=${MODEL} n_sample=${N_SAMPLE} sample_ratio=${SAMPLE_RATIO} check=${CHECK:-auto} text_only=${TEXT_ONLY} -> ${OUT}"
+echo "[aime] model=${MODEL} n_sample=${N_SAMPLE} ratio=${RATIO:-full} check=${CHECK:-auto} text_only=${TEXT_ONLY} -> ${OUT}"
 
 # 1) inference (needs LLM_EVAL_BASE_URL / LLM_EVAL_API_KEY / LLM_EVAL_MODEL, or pass --base-url/--api-key/--model)
 python "${EVAL_DIR}/run_eval.py" "${ARGS[@]}"

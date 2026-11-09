@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,14 +25,18 @@ BENCH_DEFAULTS = {
     "gpqa": {"n_sample": 8, "temperature": 1.0, "top_p": 1.0},
 }
 
-# Fixed so the same dataset+ratio always selects the same tasks; SHA-256 ordering keeps selection
-# stable across Python versions and dataset order.
-SAMPLE_SEED = 20260101
 
+def _read_data_manifest(data_file: str) -> dict[str, Any]:
+    path = Path(str(data_file) + ".meta.json")
+    if not path.is_file():
+        return {}
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
-def _sample_key(task_id: str) -> bytes:
-    """Stable per-task ordering key, independent of Python version and dataset order."""
-    return hashlib.sha256(f"{SAMPLE_SEED}:{task_id}".encode()).digest()
 
 _IMAGE_MAGIC = (
     (b"\xff\xd8\xff", "image/jpeg"),
@@ -181,13 +185,7 @@ def main() -> int:
     parser.add_argument(
         "--text-only", action="store_true", help="skip image questions (currently only HLE has images)"
     )
-    parser.add_argument(
-        "--sample-ratio", type=float, default=1.0, help="fraction of tasks to evaluate, 0 < r <= 1 (deterministic)"
-    )
     args = parser.parse_args()
-
-    if not (0 < args.sample_ratio <= 1):
-        parser.error("--sample-ratio must be in (0, 1]")
 
     for key, default in BENCH_DEFAULTS[args.bench].items():
         if getattr(args, key) is None:
@@ -201,10 +199,13 @@ def main() -> int:
             + " (or LLM_EVAL_BASE_URL / LLM_EVAL_API_KEY / LLM_EVAL_MODEL)"
         )
 
+    manifest = _read_data_manifest(args.data_file)
+    ratio = float(manifest.get("sample_ratio", 1.0))
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")  # noqa: UP017
     out_dir = resolve_out_dir(
         args.out_dir,
         bench=args.bench,
-        tag=args.tag or f"{args.model.replace('/', '_')}-n{args.n_sample}",
+        tag=args.tag or f"{args.model.replace('/', '_')}-n{args.n_sample}-r{ratio:g}-{stamp}",
     )
 
     bench = load_bench(args.bench)
@@ -216,13 +217,6 @@ def main() -> int:
         print(f"[gen] text-only: skipped {before - len(records)} image tasks", flush=True)
     if not records:
         raise SystemExit("no problem left to run (check --data-file, --limit and --text-only)")
-    if args.sample_ratio < 1.0:
-        total = len(records)
-        keep_n = max(1, round(args.sample_ratio * total))
-        ranked = sorted(records, key=lambda record: _sample_key(record["task_id"]))
-        keep = {record["task_id"] for record in ranked[:keep_n]}
-        records = [record for record in records if record["task_id"] in keep]
-        print(f"[gen] sample-ratio={args.sample_ratio}: selected {len(records)}/{total} tasks", flush=True)
 
     meta = {
         "bench": args.bench,
@@ -239,9 +233,8 @@ def main() -> int:
         "text_only": args.text_only,
         "concurrency": args.concurrency,
         "expected_tasks": len(records),
-        "sample_ratio": args.sample_ratio,
+        "sample_ratio": ratio,
         "selected_task_count": len(records),
-        "selected_task_ids": sorted(record["task_id"] for record in records),
     }
     os.makedirs(out_dir, exist_ok=True)
     for old in Path(out_dir).glob("raw_rank*.jsonl"):

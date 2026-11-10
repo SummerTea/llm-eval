@@ -313,6 +313,41 @@ python score.py --out-dir outputs/my-task
 
 ---
 
+## 独立单目录工具（gpqa_standalone/）
+
+`gpqa_standalone/` 是一套可整目录拷走、零第三方依赖的 GPQA Diamond 评测工具，
+适合内网/客户现场快速出分。它复用主流程的 GPQA prompt 与答案抽取规则，但独立运行，
+不依赖 `common/`、`data/`、裁判模型或 ModelScope。
+
+```text
+gpqa_standalone/
+├── gpqa_single.py       # 纯标准库；规则判分；stdout 报告
+├── gpqa_diamond.jsonl   # 自带 198 题（与 gpqa_single.py 同级）
+└── README.md            # 通用测试配置与口径
+```
+
+通用 20 题配置（确定性 r0.1 子集，每次同一批题，指纹 `ids_sha256=ee1c465fe1dc`）：
+
+```bash
+cd gpqa_standalone
+NO_PROXY=<host> python3 gpqa_single.py \
+  --base-url http://<host>:8000/v1 --api-key <key-or-dummy> \
+  --model <model> \
+  --sample 20 --sample-seed 20260101 --n-sample 1 \
+  --temperature 0 --max-tokens 32768 \
+  --concurrency 4 --timeout 300 --retries 1 --verbose
+```
+
+与主流程的差异：
+
+- 仅 rule 判分，不需要 `EVAL_JUDGE_*`；HLE 不在此工具范围内。
+- 默认 `n_sample=1`、`temperature=1.0`；主流程 GPQA 默认 `n_sample=8`，分数不可直接对表。
+- 选题由 `--sample` + `--sample-seed` 确定性抽取，报告打印 `ids_sha256` 可核对。
+- `gpqa_diamond.jsonl` 是 `data/gpqa_diamond.jsonl` 的副本；主数据更新后可覆盖。
+- 详细参数、退出码与参考量级见 `gpqa_standalone/README.md`。
+
+---
+
 ## 目录结构
 
 ```text
@@ -323,6 +358,7 @@ python score.py --out-dir outputs/my-task
 ├── score.py            # 抽取、rule/LLM 判题、Pass@k、report.html
 ├── common/             # client, io, loader, paths, passk, judge, report
 ├── aime/ gpqa/ hle/     # bench.py（prompt/抽取/评分）+ 单测试集 run.sh
+├── gpqa_standalone/     # 独立单目录 GPQA 工具（零第三方依赖 + 自带 198 题）
 └── data/ outputs/      # 本地生成，已被 git 忽略
 ```
 

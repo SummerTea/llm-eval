@@ -134,6 +134,8 @@ TASK=qwen-regression N_SAMPLE=1 MAX_TOKENS=8192 bash run.sh
 TEST_SETS="gpqa:data/gpqa_diamond.jsonl" TASK=gpqa-full bash run.sh
 ```
 
+> 全量 198 题；不设 `N_SAMPLE` 时 GPQA 默认每题 8 次采样（约 1584 次请求）。只想把全量题各跑一遍可加 `N_SAMPLE=1`。
+
 ### 跑 0.01 / 0.1 / 0.2
 
 副本已由 `prepare_data.py` 生成，直接在 `TEST_SETS` 里选文件：
@@ -206,7 +208,7 @@ TEST_SETS="gpqa:/path/to/my.jsonl" TASK=my-data N_SAMPLE=1 bash run.sh
 | HLE | `llm` | 答案多为自由文本，必须用判题模型 |
 
 - `CHECK=llm`：让所有测试集都走 LLM 判题。
-- 报告会给出每个测试集的 `rule` 与 `llm` 一致率（`rule_vs_llm_agreement`）。
+- 走 LLM 判题的测试集会额外给出 `rule` 与 `llm` 的一致率（`rule_vs_llm_agreement`）。
 
 ---
 
@@ -295,7 +297,7 @@ python score.py --out-dir outputs/my-task
 | `401` / `403` | 检查 `LLM_EVAL_BASE_URL`、`LLM_EVAL_API_KEY`（HLE 还要检查 `EVAL_JUDGE_*`） |
 | `coverage_complete=false` | 有请求失败或被截断：看 `summary.json` 对应测试集的 `finish_reasons` |
 | HLE 下载很慢/很大 | 正常，HLE 原始包约 274MB（含图片）；可先用 `--benches aime,gpqa` |
-| HLE 判题解析失败 | 判题模型太弱或输出被截断：换更强裁判，或提高其输出预算 |
+| HLE 判题解析失败 | 判题模型太弱或输出不可解析：换更强裁判；弱模型会产生大量 `judge_unparsed` |
 | 数据想重新下载 | 删除 `data/_raw/<bench>` 后重跑 `prepare_data.py` |
 
 ---
@@ -307,7 +309,7 @@ python score.py --out-dir outputs/my-task
   运行期只选文件，不再抽样。选择是确定性的，同一比例每次都是同一批题。
 - **HLE 上游仍是整包下载**：抽样减少的是准备后的文件体积与运行调用量，不是上游下载量。
 - **数据不随仓库分发**：`data/`、`outputs/` 已被 git 忽略。HLE 要求不得再分发；AIME 为非商业用途。
-- GPQA 数据集与 HLE 图片/视觉路径在代码中已支持，但本项目仅在 mock 环境验证过。
+- GPQA 与 HLE（含图片题）已在真实端点做过功能冒烟（GPQA 0.1、HLE 0.1），但未做全量、多模型或强裁判验证。
 
 ---
 
